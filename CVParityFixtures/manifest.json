@@ -1,0 +1,27 @@
+{
+  "cv2_version": "4.13.0",
+  "file_sizes": [
+    {
+      "bytes": 105135,
+      "file": "contours.json"
+    },
+    {
+      "bytes": 8003,
+      "file": "geometry.json"
+    },
+    {
+      "bytes": 529954,
+      "file": "morphology.json"
+    },
+    {
+      "bytes": 90930,
+      "file": "basicops.json"
+    }
+  ],
+  "files": [
+    "contours.json",
+    "geometry.json",
+    "morphology.json",
+    "basicops.json"
+  ]
+}

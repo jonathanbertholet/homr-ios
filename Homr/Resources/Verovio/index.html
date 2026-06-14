@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- Disable user pinch/zoom blocking and fit content to device width.
+       We allow scaling so the user can zoom the engraved score. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
+  <title>Verovio Score</title>
+  <style>
+    /* Basic page reset so the SVG fills the WKWebView nicely. */
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+      -webkit-text-size-adjust: 100%;
+    }
+    /* Container that holds the rendered SVG pages. */
+    #score {
+      padding: 8px;
+      box-sizing: border-box;
+    }
+    /* Make every rendered SVG page responsive: scale down to fit width
+       while preserving aspect ratio. Verovio emits explicit width/height,
+       so we override them here for fluid layout. */
+    #score svg {
+      width: 100% !important;
+      height: auto !important;
+      display: block;
+      margin: 0 auto 16px auto;
+    }
+    /* Simple status / error text styling. */
+    #status {
+      font-family: -apple-system, system-ui, sans-serif;
+      color: #888;
+      font-size: 14px;
+      padding: 12px;
+    }
+    /* Live playback highlight: notes currently sounding turn accent-red. The
+       rule targets the note group and its drawable descendants so noteheads,
+       stems and ledger marks all light up together. */
+    #score .playing,
+    #score .playing path,
+    #score .playing use,
+    #score .playing ellipse,
+    #score .playing rect,
+    #score .playing polygon {
+      fill: #e8462b !important;
+      stroke: #e8462b !important;
+    }
+    /* Vertical playhead line that sweeps across the system currently sounding.
+       Positioned in document coordinates by JS; CSS transitions make its motion
+       between note positions smooth/animated. */
+    #playhead {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 2.5px;
+      height: 0;
+      background: #e8462b;
+      border-radius: 2px;
+      box-shadow: 0 0 6px rgba(232, 70, 43, 0.6);
+      opacity: 0;
+      pointer-events: none;
+      z-index: 10;
+      will-change: left, top, height;
+      transition: left 0.09s linear,
+                  top 0.18s ease,
+                  height 0.18s ease,
+                  opacity 0.2s ease;
+    }
+  </style>
+</head>
+<body>
+  <!-- Status line shown until the score is rendered (or on error). -->
+  <div id="status">Loading Verovio…</div>
+  <!-- Target container into which the concatenated SVG pages are injected. -->
+  <div id="score"></div>
+
+  <!-- Vertical playhead line; moved/sized by JS during playback. -->
+  <div id="playhead"></div>
+
+  <!-- Load the fully self-contained Verovio toolkit.
+       This single file embeds the WebAssembly binary (base64) AND the default
+       music fonts, so NO additional network/file fetches happen at runtime.
+       When loaded as a classic <script>, it assigns the global `verovio`,
+       which exposes `verovio.module` (the emscripten Module) and
+       `verovio.toolkit` (the toolkit constructor). -->
+  <script src="verovio-toolkit-wasm.js"></script>
+
+  <script>
+    "use strict";
+
+    // ---------------------------------------------------------------------
+    // Verovio initialization is asynchronous: the WebAssembly runtime needs
+    // to compile/instantiate before we can construct a toolkit. We expose a
+    // promise (`verovioReady`) that resolves once the runtime is ready, and a
+    // single shared toolkit instance.
+    // ---------------------------------------------------------------------
+
+    var verovioToolkit = null;          // Lazily created toolkit instance.
+    var pendingXML = null;              // XML requested before init completed.
+
+    // Promise that resolves when the Verovio WASM runtime is initialized.
+    var verovioReady = new Promise(function (resolve, reject) {
+      try {
+        // `verovio` is the global created by verovio-toolkit-wasm.js.
+        if (typeof verovio === "undefined" || !verovio.module) {
+          reject(new Error("Verovio global not found"));
+          return;
+        }
+
+        // Construct the shared toolkit and resolve once it is safe to do so.
+        var finish = function () {
+          try {
+            verovioToolkit = new verovio.toolkit();
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        };
+
+        // The emscripten Module sets `calledRun` to true once the runtime has
+        // finished starting. If it is already true the runtime initialized
+        // before this script ran, so finish immediately; otherwise wait for
+        // the documented `onRuntimeInitialized` callback.
+        if (verovio.module.calledRun) {
+          finish();
+        } else {
+          verovio.module.onRuntimeInitialized = finish;
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+    // ---------------------------------------------------------------------
+    // Core render routine. Takes a MusicXML (or MEI/etc.) string, loads it
+    // into the toolkit, and injects every rendered SVG page into #score.
+    // ---------------------------------------------------------------------
+    function doRender(xmlString) {
+      var statusEl = document.getElementById("status");
+      var scoreEl = document.getElementById("score");
+
+      try {
+        // Engraving options. `breaks: "auto"` lets Verovio lay out systems to
+        // fit `pageWidth`; `adjustPageHeight` trims trailing whitespace.
+        verovioToolkit.setOptions({
+          scale: 40,
+          pageWidth: 2100,
+          adjustPageHeight: true,
+          breaks: "auto"
+        });
+
+        // Parse + load the data. Returns false on failure.
+        var ok = verovioToolkit.loadData(xmlString);
+        if (!ok) {
+          statusEl.textContent = "Failed to load score data.";
+          statusEl.style.display = "block";
+          scoreEl.innerHTML = "";
+          return;
+        }
+
+        // Concatenate the SVG for every page (pages are 1-indexed).
+        var pageCount = verovioToolkit.getPageCount();
+        var html = "";
+        for (var p = 1; p <= pageCount; p++) {
+          html += verovioToolkit.renderToSVG(p);
+        }
+
+        scoreEl.innerHTML = html;
+        statusEl.style.display = "none";   // Hide the status line on success.
+
+        // Build the time→element map used for live playback highlighting.
+        buildTimemap();
+      } catch (e) {
+        statusEl.textContent = "Render error: " + (e && e.message ? e.message : e);
+        statusEl.style.display = "block";
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Playback highlighting.
+    //
+    // Verovio can report which notes sound at a given time (ms). We render the
+    // score's total time once (from the timemap) so the Swift side can drive
+    // highlighting with a simple 0…1 fraction of the playback position — this
+    // keeps it aligned even though the in-app synth and Verovio may use
+    // different absolute tempos (both are constant, so a linear map suffices).
+    // ---------------------------------------------------------------------
+    var totalTimeMs = 0;          // Total playback time per Verovio's timemap.
+    var highlightedIds = [];      // Element ids currently flagged "playing".
+
+    function buildTimemap() {
+      totalTimeMs = 0;
+      highlightedIds = [];
+      try {
+        var tm = verovioToolkit.renderToTimemap({ includeMeasures: true });
+        for (var i = 0; i < tm.length; i++) {
+          if (tm[i].tstamp > totalTimeMs) totalTimeMs = tm[i].tstamp;
+        }
+      } catch (e) {
+        totalTimeMs = 0;   // Highlighting simply becomes a no-op.
+      }
+    }
+
+    // Highlight the notes sounding at `frac` (0…1) of the piece, clearing the
+    // previous highlight. Auto-scrolls to keep the playhead visible.
+    window.highlightAtFraction = function (frac) {
+      if (!verovioToolkit || totalTimeMs <= 0) return;
+      if (frac < 0) frac = 0; else if (frac > 1) frac = 1;
+      var ms = frac * totalTimeMs;
+
+      var ids = [];
+      try {
+        var res = verovioToolkit.getElementsAtTime(ms);
+        if (res && res.notes) ids = res.notes;
+      } catch (e) {
+        return;
+      }
+
+      // Clear the previous set.
+      for (var i = 0; i < highlightedIds.length; i++) {
+        var prev = document.getElementById(highlightedIds[i]);
+        if (prev) prev.classList.remove("playing");
+      }
+      // Flag the new set and remember it.
+      highlightedIds = ids;
+      var firstEl = null;
+      for (var j = 0; j < ids.length; j++) {
+        var el = document.getElementById(ids[j]);
+        if (el) {
+          el.classList.add("playing");
+          if (!firstEl) firstEl = el;
+        }
+      }
+
+      // Move the vertical playhead to the current notes and keep them on screen.
+      updatePlayhead(firstEl);
+      if (firstEl && firstEl.scrollIntoViewIfNeeded) {
+        firstEl.scrollIntoViewIfNeeded(false);
+      }
+    };
+
+    // Position the vertical playhead at `noteEl`'s x, spanning its enclosing
+    // system (so the line crosses every staff sounding at that moment). Uses
+    // document coordinates; CSS transitions animate the movement.
+    function updatePlayhead(noteEl) {
+      var ph = document.getElementById("playhead");
+      if (!ph) return;
+      if (!noteEl) { ph.style.opacity = "0"; return; }
+
+      var noteRect = noteEl.getBoundingClientRect();
+      // Prefer the enclosing system for vertical extent; fall back to the page.
+      var container =
+        (noteEl.closest && (noteEl.closest(".system") || noteEl.closest("svg"))) || noteEl;
+      var boxRect = container.getBoundingClientRect();
+
+      var x = noteRect.left + noteRect.width / 2 + window.scrollX;
+      var top = boxRect.top + window.scrollY;
+
+      ph.style.left = x + "px";
+      ph.style.top = top + "px";
+      ph.style.height = boxRect.height + "px";
+      ph.style.opacity = "1";
+    }
+
+    // Remove any active highlight + hide the playhead (called when playback stops).
+    window.clearHighlight = function () {
+      for (var i = 0; i < highlightedIds.length; i++) {
+        var el = document.getElementById(highlightedIds[i]);
+        if (el) el.classList.remove("playing");
+      }
+      highlightedIds = [];
+      var ph = document.getElementById("playhead");
+      if (ph) ph.style.opacity = "0";
+    };
+
+    // ---------------------------------------------------------------------
+    // Public entry point invoked from Swift (ScoreWebView) via
+    // evaluateJavaScript. The Swift side JSON-encodes the MusicXML string so
+    // it arrives here as a single, properly-escaped JS string argument.
+    //
+    // Signature: window.renderMusicXML(xmlString: String) -> void
+    //
+    // Safe to call before Verovio finishes initializing: the request is queued
+    // and replayed once `verovioReady` resolves.
+    // ---------------------------------------------------------------------
+    window.renderMusicXML = function (xmlString) {
+      pendingXML = xmlString;   // Remember the most recent request.
+      verovioReady.then(function () {
+        // Only render the latest requested XML (avoids redundant renders if
+        // called multiple times before init completed).
+        if (pendingXML !== null) {
+          var xml = pendingXML;
+          pendingXML = null;
+          doRender(xml);
+        }
+      }).catch(function (e) {
+        var statusEl = document.getElementById("status");
+        statusEl.textContent = "Verovio init failed: " + (e && e.message ? e.message : e);
+        statusEl.style.display = "block";
+      });
+    };
+
+    // Flip the status text once the runtime is ready but no XML has arrived yet.
+    verovioReady.then(function () {
+      var statusEl = document.getElementById("status");
+      if (pendingXML === null && statusEl) {
+        statusEl.textContent = "Verovio ready.";
+      }
+    });
+  </script>
+</body>
+</html>

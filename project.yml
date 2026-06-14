@@ -1,0 +1,80 @@
+name: Homr
+options:
+  bundleIdPrefix: com.homr
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+packages:
+  OnnxRuntime:
+    url: https://github.com/microsoft/onnxruntime-swift-package-manager
+    from: "1.24.1"
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
+targets:
+  Homr:
+    type: application
+    platform: iOS
+    sources:
+      # xcodegen auto-classifies non-code files (the Tokenizers JSON under
+      # Resources/) into the Copy Bundle Resources phase.
+      - path: Homr
+    dependencies:
+      - package: OnnxRuntime
+        product: onnxruntime
+      - package: ZIPFoundation
+        product: ZIPFoundation
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.homr.ios
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.10"
+        INFOPLIST_KEY_CFBundleDisplayName: Homr
+        INFOPLIST_KEY_NSCameraUsageDescription: "Homr needs camera access to scan sheet music."
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homr needs photo library access to import sheet music images."
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+  # Unit tests validating the native CV ports against golden cv2 4.13 fixtures.
+  #
+  # This is a standalone *logic* test bundle (no TEST_HOST): it compiles the CV
+  # sources directly into the test module so the tests never launch the Homr
+  # app. That keeps the suite hermetic — it exercises only the pure CV code and
+  # avoids booting the app's model-download / SwiftUI stack in the simulator.
+  HomrTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: HomrTests
+      - path: Homr/CV
+      - path: Homr/Pipeline/GrayscaleImage.swift
+      # Golden fixtures, copied into the test bundle (xcodegen routes .json to
+      # the Copy Bundle Resources phase).
+      - path: CVParityFixtures/manifest.json
+        buildPhase: resources
+      - path: CVParityFixtures/contours.json
+        buildPhase: resources
+      - path: CVParityFixtures/geometry.json
+        buildPhase: resources
+      - path: CVParityFixtures/morphology.json
+        buildPhase: resources
+      - path: CVParityFixtures/basicops.json
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.homr.ios.tests
+        SWIFT_VERSION: "5.10"
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  HomrTests:
+    build:
+      targets:
+        HomrTests: [test]
+    test:
+      targets:
+        - HomrTests
+      gatherCoverageData: false
